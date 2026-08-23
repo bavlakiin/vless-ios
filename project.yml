@@ -1,0 +1,46 @@
+name: VlessApp
+options:
+  bundleIdPrefix: com.yourid
+  deploymentTarget:
+    iOS: "12.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: REPLACE_WITH_YOUR_TEAM_ID
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  VlessApp:
+    type: application
+    platform: iOS
+    sources: [VlessApp]
+    settings:
+      base:
+        INFOPLIST_FILE: VlessApp/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourid.VlessApp
+        CODE_SIGN_ENTITLEMENTS: VlessApp/VlessApp.entitlements
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+    dependencies:
+      - target: VlessPacketTunnel
+        embed: true
+        codeSign: true
+      - framework: XrayFramework/VlessCore.xcframework
+
+  VlessPacketTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - VlessPacketTunnel
+      - path: VlessApp/VlessConfig.swift
+        target: VlessPacketTunnel
+    settings:
+      base:
+        INFOPLIST_FILE: VlessPacketTunnel/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourid.VlessApp.VlessPacketTunnel
+        CODE_SIGN_ENTITLEMENTS: VlessPacketTunnel/VlessPacketTunnel.entitlements
+        SKIP_INSTALL: true
+    dependencies:
+      - sdk: NetworkExtension.framework
+      - framework: XrayFramework/VlessCore.xcframework
