@@ -12,7 +12,16 @@
 	<key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array><string>UIInterfaceOrientationPortrait</string></array>
+	<key>NSCameraUsageDescription</key>
+	<string>Камера нужна для сканирования QR-кодов с конфигурацией сервера.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>vless</string>
+			<key>CFBundleURLSchemes</key><array><string>vlesslite</string></array>
+		</dict>
+	</array>
 </dict>
 </plist>

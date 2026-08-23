@@ -1,58 +1,76 @@
 # Инструкция для агента/модели на Маке
 
 Репозиторий — VLESS-клиент для iOS 12 (iPhone 6) по образцу Happ Plus:
-приложение на UIKit + Packet Tunnel extension, ядро Xray-core 1.8.24 +
-tun2socks, собираемое через gomobile. Цель — довести до собираемого и
-работающего на устройстве состояния. Делай по порядку:
+приложение на UIKit + Packet Tunnel extension, ядро **Xray-core 1.8.24 +
+go-tun2socks 1.16.11 (lwIP)**, собираемое через gomobile.
 
-## Этап 1 — ядро
+Состояние: код переписан под реальные API зависимостей, ядро собирается
+как есть. Осталась проверка на устройстве.
 
-1. Установи зависимости: `brew install go@1.20 xcodegen` (плюс Xcode;
-   для установки на iOS 12 нужен Xcode 10.3 на Mojave, свежий Xcode
-   подойдёт для сборки).
-2. Зайди в `core-go/vlesscore/vlesscore.go`. Это обёртка для gomobile с
-   функциями `XrayStart/XrayStop/Tun2SocksStart/Tun2SocksStop`.
-   Запусти `./scripts/build-core.sh`.
-3. Скрипт почти наверняка упадёт из-за несовпадения API: tun2socks v2.5.0
-   может не иметь `option.WithTunAddress/WithTunMask/WithTunDNS/InjectTunFD`
-   с такими именами, а у xray-core функция разбора JSON может называться
-   иначе, чем `json.FromJSON`, и может отсутствовать
-   `_ "github.com/xtls/xray-core/main/distro/all"`. Открой исходники
-   скачанных модулей в `$(go env GOMODCACHE)` и поправь обёртку под
-   реальные сигнатуры. Для tun2socks ключевое: движок должен использовать
-   УЖЕ ОТКРЫТЫЙ tun-дескриптор (fd из `NEPacketTunnelFlow`), а не создавать
-   свой — смотри в их репо `engine/tun` и mobile-примеры. Если точной опции
-   для готового fd нет, используй `option.WithFileDescriptor`/аналог или
-   подход из их `core/engine.go`.
-4. Добейся, чтобы `gomobile bind -target=ios -iosversion 12.0 ... ./vlesscore`
-   выдал `XrayFramework/VlessCore.xcframework`. Если gomobile ругается на
-   версию Go — ставь именно go 1.20.x.
+## Что уже сделано (не ломать)
 
-## Этап 2 — Xcode-проект
+1. **Ядро** (`core-go/vlesscore/vlesscore.go`):
+   - `XrayStart/XrayStop` — конфиг через `serial.DecodeJSONConfig -> Build -> core.New`
+     (официальный путь использования xray-core как библиотеки);
+   - `TunStart(sink, proxyAddr, mtu, udpTimeoutSec)` — стек lwIP из go-tun2socks;
+     пакеты ходят ЧЕРЕЗ ИНТЕРФЕЙС `PacketSink.WritePacket` и функцию `TunInput`,
+     файловый дескриптор TUN не используется вовсе (никаких KVC-трюков);
+   - сигнатуры соответствуют go-tun2socks v1.16.11:
+     `core.NewLWIPStack()`, `RegisterOutputFn`, `RegisterTCPConnHandler`,
+     `RegisterUDPConnHandler`, `socks.NewTCPHandler(host, port)`,
+     `socks.NewUDPHandler(host, port, timeout)`.
+2. **Туннель** (`VlessPacketTunnel/PacketTunnelProvider.swift`): настройки TUN,
+   pump-цикл `readPackets -> TunInput`, счётчики трафика в App Group
+   (`tun.bytes.in/out`), корректная остановка (`TunStop`, `XrayStop`).
+3. **Приложение**: список серверов с выбором и удалением, добавление
+   по QR (`AVCaptureMetadataOutput`), по ссылке из буфера, вручную,
+   подписки (URL со списком ссылок или base64), статус/трафик,
+   схема `vlesslite://` для импорта извне, share ссылки лонг-тапом.
+4. **project.yml**: extension получает `VlessConfig.swift` + `ServerStore.swift`;
+   в Info.plist есть `NSCameraUsageDescription`.
 
-5. В `project.yml` замени `REPLACE_WITH_YOUR_TEAM_ID` на Team ID из Apple
-   Developer. Запусти `xcodegen`, открой `VlessApp.xcodeproj`.
-6. Собери оба таргета. Swift-код написан под iOS 12, но имена функций из
-   фреймворка после gomobile могут отличаться (gomobile генерирует префиксы
-   вида `VlesscoreXrayStart` вместо `VlessCoreXrayStart`) — открой
-   сгенерированный `VlessCore.framework/Headers/VlessCore.h` и приведи
-   вызовы в `PacketTunnelProvider.swift` к точным именам.
-7. Проверь: у обоих таргетов есть entitlements (App Group
-   `group.vless.shared`, packet-tunnel-provider), bundle id extension =
-   `<id приложения>.VlessPacketTunnel` — иначе VPN не стартует.
+## Этап 1 — сборка ядра
+
+```bash
+brew install go@1.20 xcodegen
+./scripts/build-core.sh
+```
+
+Если упадёт — смотри реальные ошибки компиляции. Возможные точки отказа:
+
+- quic-go (транзитивная зависимость xray-core) под очень старым Xcode:
+  если ругается на версию Go/C++ — собери ядро свежим Xcode (CLT),
+  установку на устройство это не блокирует;
+- `gomobile bind` требует именно go 1.20.x — проверь `go version`;
+- после правок `vlesscore.go` сверяй имена экспортов с вызовами в Swift:
+  gomobile даёт префикс `Vlesscore…` (`VlesscoreXrayStart`,
+  `VlesscoreTunStart(sink, proxyAddr, mtu, udpTimeoutSec)`,
+  `VlesscoreTunInput(pkt)`, `VlesscoreTunStop()`, протокол
+  `VlesscorePacketSink.writePacket(_:) throws`).
+
+## Этап 2 — Xcode
+
+1. Замени `REPLACE_WITH_YOUR_TEAM_ID` в `project.yml` → `xcodegen`.
+2. Собери оба таргета. Entitlements уже прописаны (App Group
+   `group.vless.shared`, packet-tunnel-provider у обоих таргетов).
 
 ## Этап 3 — устройство
 
-8. Подключи iPhone 6, Run. Первый запуск: разрешить VPN-профиль, вставить
-   тестовую ссылку `vless://`, Import, Connect. Проверить IP на 2ip.ru.
-9. Логи туннеля — Console.app, фильтр «VlessPacketTunnel»; уровень логов
-   Xray меняется в `xrayConfig()` (`"loglevel": "debug"`).
+1. iPhone 6 (iOS 12) по кабелю → Run.
+2. Разреши VPN-профиль при первом Connect.
+3. Добавь сервер (QR/ссылка/подписка), выбери галочкой, Connect.
+4. Проверь IP на 2ip.ru; трафик должен расти в шапке экрана.
+5. Логи: Console.app, фильтр «VlessPacketTunnel»; debug-лог Xray —
+   `"loglevel": "debug"` в `xrayConfig()`.
 
-## Важно
+## Известные ограничения (честно)
 
-- Ничего не переписывай архитектурно — только точечные правки имён API.
-- `go mod tidy` тянет модули при первой сборке — нужна сеть.
-- Без платного Apple Developer-аккаунта соберётся под симулятор (проверка
-  компиляции), но на реальный iPhone 6 с iOS 12 поставит только подпись
-  платного аккаунта (либо джейлбрейк-обход подписи типа AppSync).
+- Сервер обязан поддерживать **UDP** (DNS идёт через VLESS UDP). Если нет —
+  DNS умрёт; можно переключить DNS в настройках TUN на публичный и добавить
+  обработчик `dnsfallback` из go-tun2socks (DNS over TCP) как отдельную задачу.
+- IPv6 в TUN не поднимается (только IPv4-маршрут) — сайты только-v6 будут
+  недоступны напрямую (обычно помогает fallback по A-записи).
+- Приватный API не используется, но App Store всё равно потребует
+  одобрения Network Extension entitlement; для личного сайдлоада достаточно
+  платного аккаунта.
 - Результат запушь в `main`.

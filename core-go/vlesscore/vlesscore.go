@@ -1,102 +1,146 @@
 // Package vlesscore — обёртка для gomobile bind.
-// Экспортирует 4 функции, которые видит Swift:
-//   XrayStart(configJSON) / XrayStop()
-//   Tun2SocksStart(fd, proxy, tunAddr) / Tun2SocksStop()
+//
+// Экспортирует в приложение (после сборки имена получают префикс Vlesscore):
+//
+//	XrayStart(configJSON) / XrayStop()              — ядро Xray (VLESS-outbound, SOCKS5-вход)
+//	TunStart(sink, proxyAddr, mtu, udpTimeoutSec)   — userspace TCP/IP-стек (lwIP) -> SOCKS5
+//	TunInput(pkt)                                   — IP-пакет из TUN внутрь стека
+//	TunStop()                                       — остановка стека
+//	PacketSink                                      — интерфейс приёмника пакетов (реализуется в Swift)
+//
+// Стек go-tun2socks работает БЕЗ файлового дескриптора TUN: пакеты приходят
+// через TunInput (из NEPacketTunnelFlow.readPackets), уходят через PacketSink
+// (в NEPacketTunnelFlow.writePackets). Приватные KVC-трюки не используются.
 package vlesscore
 
 import (
-	"fmt"
+	"errors"
+	"io"
+	"net"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/xtls/xray-core/core"
-	xjson "github.com/xtls/xray-core/infra/conf/json"
+	"github.com/eycorsican/go-tun2socks/core"
+	"github.com/eycorsican/go-tun2socks/proxy/socks"
+
+	xcore "github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/infra/conf/serial"
 	_ "github.com/xtls/xray-core/main/distro/all" // регистрирует все inbound/outbound
-
-	tun2socks "github.com/xjasonlyu/tun2socks/v2/core"
-	"github.com/xjasonlyu/tun2socks/v2/core/option"
 )
 
 var (
 	mu       sync.Mutex
-	instance *core.Instance
-	engine   tun2socks.Engine
+	instance *xcore.Instance
+	stack    core.LWIPStack
+	sink     PacketSink
 )
 
-// XrayStart запускает Xray с JSON-конфигом (SOCKS5 на 127.0.0.1:10808).
+// PacketSink получает исходящие IP-пакеты из TCP/IP-стека.
+type PacketSink interface {
+	WritePacket(pkt []byte) error
+}
+
+// XrayStart запускает ядро Xray с JSON-конфигом.
 func XrayStart(configJSON string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	if instance != nil {
-		return fmt.Errorf("xray already running")
+		return errors.New("xray already running")
 	}
-	// нормализуем JSON (комментарии и т.п.), как это делает xray -config
-	cfg, err := xjson.FromJSON([]byte(configJSON))
+	cfg, err := serial.DecodeJSONConfig(strings.NewReader(configJSON))
 	if err != nil {
 		return err
 	}
-	ins, err := core.New(cfg)
+	pb, err := cfg.Build()
 	if err != nil {
 		return err
 	}
-	if err := ins.Start(); err != nil {
+	ins, err := xcore.New(pb)
+	if err != nil {
+		return err
+	}
+	if err = ins.Start(); err != nil {
 		return err
 	}
 	instance = ins
 	return nil
 }
 
-// XrayStop останавливает Xray.
+// XrayStop останавливает ядро Xray.
 func XrayStop() error {
 	mu.Lock()
 	defer mu.Unlock()
 	if instance == nil {
 		return nil
 	}
-	err := instance.Close()
+	instance.Close()
 	instance = nil
-	return err
-}
-
-// Tun2SocksStart привязывает tun-дескриптор из NEPacketTunnelFlow
-// к прокси (socks5://...) и начинает перекачку пакетов.
-func Tun2SocksStart(fd int, proxy, tunAddr string) error {
-	mu.Lock()
-	defer mu.Unlock()
-	if engine != nil {
-		return fmt.Errorf("tun2socks already running")
-	}
-	eng, err := tun2socks.NewEngine(
-		option.WithTunName("tun"),
-		option.WithTunAddress(strings.SplitN(tunAddr, "/", 2)[0]),
-		option.WithTunGW(strings.SplitN(tunAddr, "/", 2)[0]),
-		option.WithTunMask("255.255.255.0"),
-		option.WithTunDNS("8.8.8.8"),
-		option.WithProxy(proxy),
-		option.WithTunPersist(false),
-	)
-	if err != nil {
-		return err
-	}
-	// NEPacketFlow даёт готовый fd; туннель уже существует, открывать не нужно
-	if err := eng.InjectTunFD(fd); err != nil {
-		return err
-	}
-	if err := eng.Start(); err != nil {
-		return err
-	}
-	engine = eng
 	return nil
 }
 
-// Tun2SocksStop останавливает перекачку.
-func Tun2SocksStop() error {
+// TunStart поднимает userspace TCP/IP-стек (lwIP) и направляет все
+// соединения в SOCKS5-прокси proxyAddr (обычно "127.0.0.1:10808").
+//
+// sink реализуется на стороне приложения: каждый исходящий IP-пакет
+// передаётся в sink.WritePacket (в Swift — запись в packetFlow).
+func TunStart(sinkArg PacketSink, proxyAddr string, mtu int, udpTimeoutSec int) error {
 	mu.Lock()
 	defer mu.Unlock()
-	if engine == nil {
+	if stack != nil {
+		return errors.New("tun already running")
+	}
+	ta, err := net.ResolveTCPAddr("tcp", proxyAddr)
+	if err != nil {
+		return err
+	}
+	host := ta.IP.String()
+	port := uint16(ta.Port)
+	timeout := time.Duration(udpTimeoutSec) * time.Second
+
+	core.RegisterTCPConnHandler(socks.NewTCPHandler(host, port))
+	core.RegisterUDPConnHandler(socks.NewUDPHandler(host, port, timeout))
+
+	s := sinkArg
+	core.RegisterOutputFn(func(data []byte) (int, error) {
+		if err := s.WritePacket(data); err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	})
+
+	stack = core.NewLWIPStack()
+	sink = s
+	_ = mtu // MTU задан внутри стека (1500); MTU TUN настраивается в приложении
+	return nil
+}
+
+// TunInput подаёт один IP-пакет из TUN в стек. Вызывается для каждого
+// пакета из NEPacketTunnelFlow.readPackets.
+func TunInput(pkt []byte) {
+	mu.Lock()
+	defer mu.Unlock()
+	if stack == nil || len(pkt) == 0 {
+		return
+	}
+	_, _ = stack.Write(pkt)
+}
+
+// TunStop останавливает стек и закрывает все соединения.
+func TunStop() error {
+	mu.Lock()
+	defer mu.Unlock()
+	if stack == nil {
 		return nil
 	}
-	err := engine.Stop()
-	engine = nil
+	err := stack.Close()
+	stack = nil
+	sink = nil
 	return err
 }
+
+// compile-time проверки интерфейсов
+var (
+	_ io.Writer = stack
+	_ PacketSink = sink
+)

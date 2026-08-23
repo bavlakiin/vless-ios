@@ -1,0 +1,53 @@
+name: Build IPA (unsigned)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Build core (Xray + tun2socks -> xcframework)
+        run: ./scripts/build-core.sh
+
+      - name: Generate Xcode project
+        run: |
+          # убираем заглушку Team ID — собираем неподписанным
+          sed -i '' 's/REPLACE_WITH_YOUR_TEAM_ID//g' project.yml
+          xcodegen
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild \
+            -project VlessApp.xcodeproj \
+            -target VlessApp \
+            -configuration Release \
+            -sdk iphoneos \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            SYMROOT="$PWD/build/sym" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Pack unsigned IPA
+        run: |
+          mkdir -p build/Payload
+          cp -R "build/sym/Release-iphoneos/VlessApp.app" build/Payload/
+          cd build
+          zip -qry vless-ios12-unsigned.ipa Payload
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vless-ios12-unsigned-ipa
+          path: build/vless-ios12-unsigned.ipa

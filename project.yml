@@ -27,6 +27,7 @@ targets:
         embed: true
         codeSign: true
       - framework: XrayFramework/VlessCore.xcframework
+        embed: true
 
   VlessPacketTunnel:
     type: app-extension
@@ -34,6 +35,8 @@ targets:
     sources:
       - VlessPacketTunnel
       - path: VlessApp/VlessConfig.swift
+        target: VlessPacketTunnel
+      - path: VlessApp/ServerStore.swift
         target: VlessPacketTunnel
     settings:
       base:

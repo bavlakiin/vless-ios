@@ -1,0 +1,6 @@
+build/
+DerivedData/
+XrayFramework/
+*.ipa
+.DS_Store
+xcuserdata/

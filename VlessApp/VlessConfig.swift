@@ -14,6 +14,8 @@ struct VlessProfile: Codable {
     var shortId: String?          // reality sid
     var path: String?             // ws path / grpc serviceName
     var allowInsecure: Bool = false
+
+    var hostLabel: String { return "\(address):\(port)" }
 }
 
 enum VlessParser {
@@ -44,13 +46,63 @@ enum VlessParser {
     }
 }
 
+extension VlessProfile {
+
+    /// Обратная сборка ссылки vless:// (для «Поделиться»).
+    var url: String {
+        var components = URLComponents()
+        components.scheme = "vless"
+        components.user = uuid
+        components.host = address
+        components.port = port
+
+        var items: [(String, String)] = [("type", network), ("security", security)]
+        if let sni = sni { items.append(("sni", sni)) }
+        if let fp = fingerprint { items.append(("fp", fp)) }
+        if security == "reality" {
+            if let pbk = publicKey { items.append(("pbk", pbk)) }
+            if let sid = shortId { items.append(("sid", sid)) }
+        } else if security == "tls" {
+            if let path = path { items.append(("path", path)) }
+        }
+        if allowInsecure { items.append(("allowInsecure", "1")) }
+        components.queryItems = items.map { URLQueryItem(name: $0.0, value: $0.1) }
+        components.fragment = name
+        return components.string ?? ""
+    }
+
+    /// Разбор тела подписки: список ссылок построчно либо base64.
+    static func parseSubscription(_ body: String) -> [VlessProfile] {
+        var text = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.contains("vless://") {
+            var base64 = text
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            while base64.count % 4 != 0 { base64 += "=" }
+            if let data = Data(base64Encoded: base64),
+               let decoded = String(data: data, encoding: .utf8) {
+                text = decoded
+            }
+        }
+
+        var result: [VlessProfile] = []
+        for line in text.components(separatedBy: CharacterSet.newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.lowercased().hasPrefix("vless://"),
+                  let profile = VlessParser.parse(trimmed) else { continue }
+            result.append(profile)
+        }
+        return result
+    }
+}
+
 private extension URL {
     var queryParameters: [String: String] {
         var result: [String: String] = [:]
         guard let query = URLComponents(url: self, resolvingAgainstBaseURL: false)?.queryItems?
             .map({ ($0.name, $0.value ?? "") }) else { return result }
         // iOS 12: Dictionary(uniqueKeysWithValues:) падает на дублях
-        for (k, v) in query { result[k] = v }
+        for (key, value) in query { result[key] = value }
         return result
     }
 }

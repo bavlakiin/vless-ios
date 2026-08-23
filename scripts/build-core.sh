@@ -1,20 +1,22 @@
 #!/bin/bash
-# Сборка VlessCore.xcframework (Xray-core + tun2socks) для iOS 12+.
+# Сборка VlessCore.xcframework (Xray-core + go-tun2socks/lwIP) для iOS 12+.
 # Запускать на Маке из корня репозитория:  ./scripts/build-core.sh
 set -euo pipefail
 
 IOS_MIN=12.0
 OUT_DIR="$(dirname "$0")/../XrayFramework"
-WORK="$(mktemp -d /tmp/vlesscore.XXXXXX)"
 
-echo "== 1/3 Клонируем зависимости =="
-cp -r "$(dirname "$0")/../core-go" "$WORK/core"
-cd "$WORK/core"
-GO111MODULE=on go mod tidy          # подтянет xray-core 1.8.24 и tun2socks 2.5.0
+echo "== 1/3 Подготавливаем модуль ядра =="
+cd "$(dirname "$0")/../core-go"
+GO111MODULE=on go mod tidy   # подтянет xray-core 1.8.24 и go-tun2socks 1.16.11 (+ indirect)
 
-echo "== 2/3 gomobile bind =="
+echo "== 2/3 Устанавливаем gomobile =="
+GO111MODULE=on go install golang.org/x/mobile/cmd/gomobile@latest
 GO111MODULE=on go install golang.org/x/mobile/bind@latest
+export PATH="$PATH:$(go env GOPATH)/bin"
+gomobile init
 
+echo "== 3/3 gomobile bind =="
 mkdir -p "$OUT_DIR"
 GO111MODULE=on gomobile bind \
   -target=ios -iosversion "$IOS_MIN" \
@@ -22,7 +24,5 @@ GO111MODULE=on gomobile bind \
   -o "$OUT_DIR/VlessCore.xcframework" \
   ./vlesscore
 
-echo "== 3/4 Чистим симуляторные куски (не нужны для устройства) — пропускаем =="
-
 echo "Готово: $OUT_DIR/VlessCore.xcframework"
-echo "Теперь: xcodegen && открой VlessApp.xcodeproj в Xcode"
+echo "Далее: замените REPLACE_WITH_YOUR_TEAM_ID в project.yml и выполните: xcodegen"
